@@ -81,7 +81,7 @@ export default function MenuPage() {
       // Start 10-minute timer
       timerRef.current = setTimeout(() => {
         window.location.href = "https://www.google.com";
-      }, 10 * 60 * 1000); // 10 minutes
+      }, 2 * 60 * 1000); // 2 minutes
     }
 
     return () => {
@@ -237,7 +237,7 @@ export default function MenuPage() {
     }
 
     // If not 3rd attempt, show error and clear inputs
-    setFieldErr(`Incorrect code. Please try again. (Attempt ${newAttempts} of 3)`);
+    setFieldErr(`Incorrect code. Please try again.`);
     setCode(["", "", "", "", "", ""]);
     codeInputs.current[0]?.focus();
   };
